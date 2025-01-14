@@ -94,20 +94,35 @@ impl Engine {
         match parse_sql(query) {
             Ok((_, sql_query)) => match sql_query {
                 SQLQuery::Select { columns, table } => {
-                    // Implement SELECT logic here
-                    Ok(format!("SELECT query executed on table: {}", table))
+                    if columns.len() != 1 || columns[0] != "value" {
+                        return Err("Only SELECT value FROM t WHERE key = ? is supported".to_string());
+                    }
+                    let key = table.as_bytes();
+                    let value = self.get(key);
+                    Ok(format!("SELECT result: {}", String::from_utf8_lossy(&value)))
                 }
                 SQLQuery::Insert { table, values } => {
-                    // Implement INSERT logic here
-                    Ok(format!("INSERT query executed on table: {}", table))
+                    if values.len() != 2 {
+                        return Err("Only INSERT INTO t VALUES (\"key\", \"value\") is supported".to_string());
+                    }
+                    let key = values[0].as_bytes();
+                    let value = values[1].as_bytes().to_vec();
+                    self.set(key, value);
+                    Ok("INSERT query executed".to_string())
                 }
                 SQLQuery::Update { table, set } => {
-                    // Implement UPDATE logic here
-                    Ok(format!("UPDATE query executed on table: {}", table))
+                    if set.len() != 1 || set[0].0 != "value" {
+                        return Err("Only UPDATE t SET value = ? WHERE key = ? is supported".to_string());
+                    }
+                    let key = table.as_bytes();
+                    let value = set[0].1.as_bytes().to_vec();
+                    self.set(key, value);
+                    Ok("UPDATE query executed".to_string())
                 }
                 SQLQuery::Delete { table } => {
-                    // Implement DELETE logic here
-                    Ok(format!("DELETE query executed on table: {}", table))
+                    let key = table.as_bytes();
+                    self.del(key);
+                    Ok("DELETE query executed".to_string())
                 }
             },
             Err(_) => Err("Failed to parse SQL query".to_string()),
@@ -189,26 +204,26 @@ mod tests {
         );
 
         // Test execute_sql
-        let select_query = "SELECT column1, column2 FROM table";
-        let insert_query = "INSERT INTO table VALUES (value1, value2)";
-        let update_query = "UPDATE table SET column1 = value1, column2 = value2";
-        let delete_query = "DELETE FROM table";
+        let select_query = "SELECT value FROM key";
+        let insert_query = "INSERT INTO key VALUES (key, value)";
+        let update_query = "UPDATE key SET value = value";
+        let delete_query = "DELETE FROM key";
 
         assert_eq!(
             engine.execute_sql(select_query),
-            Ok("SELECT query executed on table: table".to_string())
+            Ok("SELECT result: value".to_string())
         );
         assert_eq!(
             engine.execute_sql(insert_query),
-            Ok("INSERT query executed on table: table".to_string())
+            Ok("INSERT query executed".to_string())
         );
         assert_eq!(
             engine.execute_sql(update_query),
-            Ok("UPDATE query executed on table: table".to_string())
+            Ok("UPDATE query executed".to_string())
         );
         assert_eq!(
             engine.execute_sql(delete_query),
-            Ok("DELETE query executed on table: table".to_string())
+            Ok("DELETE query executed".to_string())
         );
 
         // Clean up

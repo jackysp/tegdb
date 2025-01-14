@@ -28,10 +28,10 @@ fn main() {
     }
 
     // Execute SQL queries
-    let select_query = "SELECT column1, column2 FROM table";
-    let insert_query = "INSERT INTO table VALUES (value1, value2)";
-    let update_query = "UPDATE table SET column1 = value1, column2 = value2";
-    let delete_query = "DELETE FROM table";
+    let select_query = "SELECT value FROM key";
+    let insert_query = "INSERT INTO key VALUES (key, value)";
+    let update_query = "UPDATE key SET value = value";
+    let delete_query = "DELETE FROM key";
 
     match engine.execute_sql(select_query) {
         Ok(result) => println!("{}", result),
