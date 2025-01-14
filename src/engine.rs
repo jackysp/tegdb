@@ -3,6 +3,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::PathBuf;
+use crate::sql::{parse_sql, SQLQuery};
 
 pub struct Engine {
     log: Log,
@@ -88,6 +89,30 @@ impl Engine {
             (key.clone(), value)
         }))
     }
+
+    pub fn execute_sql(&mut self, query: &str) -> Result<String, String> {
+        match parse_sql(query) {
+            Ok((_, sql_query)) => match sql_query {
+                SQLQuery::Select { columns, table } => {
+                    // Implement SELECT logic here
+                    Ok(format!("SELECT query executed on table: {}", table))
+                }
+                SQLQuery::Insert { table, values } => {
+                    // Implement INSERT logic here
+                    Ok(format!("INSERT query executed on table: {}", table))
+                }
+                SQLQuery::Update { table, set } => {
+                    // Implement UPDATE logic here
+                    Ok(format!("UPDATE query executed on table: {}", table))
+                }
+                SQLQuery::Delete { table } => {
+                    // Implement DELETE logic here
+                    Ok(format!("DELETE query executed on table: {}", table))
+                }
+            },
+            Err(_) => Err("Failed to parse SQL query".to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +186,29 @@ mod tests {
             result_strings, expected_strings,
             "Expected: {:?}, Got: {:?}",
             expected_strings, result_strings
+        );
+
+        // Test execute_sql
+        let select_query = "SELECT column1, column2 FROM table";
+        let insert_query = "INSERT INTO table VALUES (value1, value2)";
+        let update_query = "UPDATE table SET column1 = value1, column2 = value2";
+        let delete_query = "DELETE FROM table";
+
+        assert_eq!(
+            engine.execute_sql(select_query),
+            Ok("SELECT query executed on table: table".to_string())
+        );
+        assert_eq!(
+            engine.execute_sql(insert_query),
+            Ok("INSERT query executed on table: table".to_string())
+        );
+        assert_eq!(
+            engine.execute_sql(update_query),
+            Ok("UPDATE query executed on table: table".to_string())
+        );
+        assert_eq!(
+            engine.execute_sql(delete_query),
+            Ok("DELETE query executed on table: table".to_string())
         );
 
         // Clean up
