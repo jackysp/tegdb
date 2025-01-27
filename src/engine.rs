@@ -161,6 +161,33 @@ mod tests {
         drop(engine);
         fs::remove_file(path).unwrap();
     }
+
+    #[tokio::test]
+    async fn test_concurrent_access() {
+        use tokio::sync::Mutex;
+        let path = PathBuf::from("concurrent.db");
+        let engine = Arc::new(Mutex::new(Engine::new(path.clone())));
+
+        let tasks: Vec<_> = (0..10)
+            .map(|i| {
+                let engine = engine.clone();
+                tokio::spawn(async move {
+                    let key = format!("key_{}", i).into_bytes();
+                    let value = format!("value_{}", i).into_bytes();
+                    engine.lock().await.set(&key, value.clone()).await.unwrap();
+                    let got = engine.lock().await.get(&key).await.unwrap();
+                    assert_eq!(got, value);
+                })
+            })
+            .collect();
+
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        drop(engine);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 impl Engine {
