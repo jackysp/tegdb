@@ -1,22 +1,27 @@
-use criterion::{criterion_group, criterion_main, Criterion, black_box};
+use criterion::{criterion_group, criterion_main, Criterion, black_box, Throughput};
 use tokio::runtime::Runtime;
 use std::path::PathBuf;
 use tegdb::Engine;
 
 fn concurrency_engine_benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    c.bench_function("engine concurrent set", |b| {
+    
+    let mut group = c.benchmark_group("engine_concurrent");
+    // We're doing 4 operations per iteration
+    group.throughput(Throughput::Elements(4));
+
+    group.bench_function("set", |b| {
         b.iter(|| {
             std::fs::remove_file("concurrent.db").ok();
             rt.block_on(async {
                 let engine = Engine::new(PathBuf::from("concurrent.db"));
                 let mut tasks = Vec::new();
-                for i in 0..4 {
-                    let key = format!("key_{}", i).into_bytes();
-                    let value = format!("value_{}", i).into_bytes();
+                for _ in 0..4 {
+                    let key = b"key";
+                    let value = b"value";
                     let mut engine = engine.clone();
                     tasks.push(tokio::spawn(async move {
-                        engine.set(&key, value).await.unwrap();
+                        engine.set(key, value.to_vec()).await.unwrap();
                     }));
                 }
                 for t in tasks {
@@ -26,17 +31,17 @@ fn concurrency_engine_benchmark(c: &mut Criterion) {
         });
     });
 
-    c.bench_function("engine concurrent get", |b| {
+    group.bench_function("get", |b| {
         b.iter(|| {
             std::fs::remove_file("concurrent.db").ok();
             rt.block_on(async {
                 let engine = Engine::new(PathBuf::from("concurrent.db"));
                 let mut tasks = Vec::new();
-                for i in 0..4 {
-                    let key = format!("get_key_{}", i).into_bytes();
+                for _ in 0..4 {
+                    let key = b"key";
                     let mut engine = engine.clone();
                     tasks.push(tokio::spawn(async move {
-                        let _ = engine.get(&key).await;
+                        let _ = engine.get(key).await;
                     }));
                 }
                 for t in tasks {
@@ -46,7 +51,7 @@ fn concurrency_engine_benchmark(c: &mut Criterion) {
         });
     });
 
-    c.bench_function("engine concurrent scan", |b| {
+    group.bench_function("scan", |b| {
         b.iter(|| {
             std::fs::remove_file("concurrent.db").ok();
             rt.block_on(async {
@@ -69,17 +74,17 @@ fn concurrency_engine_benchmark(c: &mut Criterion) {
         });
     });
 
-    c.bench_function("engine concurrent del", |b| {
+    group.bench_function("del", |b| {
         b.iter(|| {
             std::fs::remove_file("concurrent.db").ok();
             rt.block_on(async {
                 let engine = Engine::new(PathBuf::from("concurrent.db"));
                 let mut tasks = Vec::new();
-                for i in 0..4 {
-                    let key = format!("del_key_{}", i).into_bytes();
+                for _ in 0..4 {
+                    let key = b"key";
                     let mut engine = engine.clone();
                     tasks.push(tokio::spawn(async move {
-                        let _ = engine.del(&key).await;
+                        let _ = engine.del(key).await;
                     }));
                 }
                 for t in tasks {
@@ -88,18 +93,25 @@ fn concurrency_engine_benchmark(c: &mut Criterion) {
             });
         });
     });
+    
+    group.finish();
 }
 
 fn concurrency_sled_benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    c.bench_function("sled concurrent insert", |b| {
+    
+    let mut group = c.benchmark_group("sled_concurrent");
+    // We're doing 4 operations per iteration
+    group.throughput(Throughput::Elements(4));
+
+    group.bench_function("insert", |b| {
         b.iter(|| {
             std::fs::remove_dir_all("concurrent_sled").ok();
             rt.block_on(async {
                 let db = sled::open("concurrent_sled").unwrap();
                 let mut tasks = Vec::new();
-                for i in 0..4 {
-                    let key = format!("sled_key_{}", i).into_bytes();
+                for _ in 0..4 {
+                    let key = b"key";
                     let db = db.clone();
                     tasks.push(tokio::spawn(async move {
                         db.insert(&key, b"value").unwrap();
@@ -111,14 +123,15 @@ fn concurrency_sled_benchmark(c: &mut Criterion) {
             });
         });
     });
-    c.bench_function("sled concurrent get", |b| {
+
+    group.bench_function("get", |b| {
         b.iter(|| {
             std::fs::remove_file("concurrent_sled").ok();
             rt.block_on(async {
                 let db = sled::open("concurrent_sled").unwrap();
                 let mut tasks = Vec::new();
-                for i in 0..4 {
-                    let key = format!("sled_get_key_{}", i).into_bytes();
+                for _ in 0..4 {
+                    let key = b"key";
                     tasks.push(tokio::spawn({
                         let db = db.clone();
                         async move {
@@ -132,7 +145,8 @@ fn concurrency_sled_benchmark(c: &mut Criterion) {
             });
         });
     });
-    c.bench_function("sled concurrent scan", |b| {
+
+    group.bench_function("scan", |b| {
         b.iter(|| {
             std::fs::remove_file("concurrent_sled").ok();
             rt.block_on(async {
@@ -150,14 +164,15 @@ fn concurrency_sled_benchmark(c: &mut Criterion) {
             });
         });
     });
-    c.bench_function("sled concurrent remove", |b| {
+
+    group.bench_function("remove", |b| {
         b.iter(|| {
             std::fs::remove_file("concurrent_sled").ok();
             rt.block_on(async {
                 let db = sled::open("concurrent_sled").unwrap();
                 let mut tasks = Vec::new();
-                for i in 0..4 {
-                    let key = format!("sled_remove_{}", i).into_bytes();
+                for _ in 0..4 {
+                    let key = b"key";
                     tasks.push(tokio::spawn({
                         let db = db.clone();
                         async move {
@@ -171,6 +186,8 @@ fn concurrency_sled_benchmark(c: &mut Criterion) {
             });
         });
     });
+
+    group.finish();
 }
 
 criterion_group!(

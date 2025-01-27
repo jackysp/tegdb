@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::PathBuf;
 use tegdb::Engine;
@@ -8,7 +8,10 @@ async fn engine_benchmark(c: &mut Criterion, value_size: usize) {
     let mut engine = Engine::new(PathBuf::from("test.db"));
     let value = vec![0; value_size];
 
-    c.bench_function(&format!("engine seq set {}", value_size), |b| {
+    let mut group = c.benchmark_group(format!("engine_seq_{}", value_size));
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("set", |b| {
         let mut i = 0;
         b.iter(|| {
             let key_str = format!("key{}", i);
@@ -22,7 +25,7 @@ async fn engine_benchmark(c: &mut Criterion, value_size: usize) {
         })
     });
 
-    c.bench_function(&format!("engine seq get {}", value_size), |b| {
+    group.bench_function("get", |b| {
         let mut i = 0;
         b.iter(|| {
             let key_str = format!("key{}", i);
@@ -52,7 +55,7 @@ async fn engine_benchmark(c: &mut Criterion, value_size: usize) {
     //    })
     //});
 
-    c.bench_function(&format!("engine seq del {}", value_size), |b| {
+    group.bench_function("del", |b| {
         let mut i = 0;
         b.iter(|| {
             let key_str = format!("key{}", i);
@@ -65,6 +68,8 @@ async fn engine_benchmark(c: &mut Criterion, value_size: usize) {
             i += 1;
         })
     });
+
+    group.finish();
 }
 
 async fn sled_benchmark(c: &mut Criterion, value_size: usize) {
@@ -72,7 +77,10 @@ async fn sled_benchmark(c: &mut Criterion, value_size: usize) {
     let db = sled::open(path).unwrap();
     let value = vec![0; value_size];
 
-    c.bench_function(&format!("sled seq insert {}", value_size), |b| {
+    let mut group = c.benchmark_group(format!("sled_seq_{}", value_size));
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("insert", |b| {
         let mut i = 0;
         b.iter(|| {
             let key_str = format!("key{}", i);
@@ -86,7 +94,7 @@ async fn sled_benchmark(c: &mut Criterion, value_size: usize) {
         })
     });
 
-    c.bench_function(&format!("sled seq get {}", value_size), |b| {
+    group.bench_function("get", |b| {
         let mut i = 0;
         b.iter(|| {
             let key_str = format!("key{}", i);
@@ -116,7 +124,7 @@ async fn sled_benchmark(c: &mut Criterion, value_size: usize) {
     //    })
     //});
 
-    c.bench_function(&format!("sled seq remove {}", value_size), |b| {
+    group.bench_function("remove", |b| {
         let mut i = 0;
         b.iter(|| {
             let key_str = format!("key{}", i);
@@ -129,6 +137,8 @@ async fn sled_benchmark(c: &mut Criterion, value_size: usize) {
             i += 1;
         })
     });
+
+    group.finish();
 }
 
 async fn redb_benchmark(c: &mut Criterion, value_size: usize) {
@@ -139,7 +149,10 @@ async fn redb_benchmark(c: &mut Criterion, value_size: usize) {
     let value = vec![0; value_size];
     let value_str = String::from_utf8(value).unwrap();
 
-    c.bench_function(&format!("redb seq put {}", value_size), |b| {
+    let mut group = c.benchmark_group(format!("redb_seq_{}", value_size));
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("put", |b| {
         let mut i = 0;
         b.iter(|| {
             tokio::task::block_in_place(|| {
@@ -159,7 +172,7 @@ async fn redb_benchmark(c: &mut Criterion, value_size: usize) {
         })
     });
 
-    c.bench_function(&format!("redb seq get {}", value_size), |b| {
+    group.bench_function("get", |b| {
         let mut i = 0;
         b.iter(|| {
             tokio::task::block_in_place(|| {
@@ -192,7 +205,7 @@ async fn redb_benchmark(c: &mut Criterion, value_size: usize) {
     //    })
     //});
 
-    c.bench_function(&format!("redb seq del {}", value_size), |b| {
+    group.bench_function("del", |b| {
         let mut i = 0;
         b.iter(|| {
             tokio::task::block_in_place(|| {
@@ -209,6 +222,8 @@ async fn redb_benchmark(c: &mut Criterion, value_size: usize) {
             });
         })
     });
+
+    group.finish();
 }
 
 fn engine_short_benchmark(c: &mut Criterion) {

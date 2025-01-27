@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use redb::{Database, ReadableTable, TableDefinition};
 use rusqlite::{params, Connection};
 use tempfile::NamedTempFile;
@@ -12,7 +12,10 @@ fn engine_benchmark(c: &mut Criterion) {
     let key = b"key";
     let value = b"value";
 
-    c.bench_function("engine set", |b| {
+    let mut group = c.benchmark_group("engine_basic");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("set", |b| {
         b.iter(|| {
             rt.block_on(async {
                 engine.set(black_box(key), black_box(value.to_vec())).await.unwrap();
@@ -20,7 +23,7 @@ fn engine_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("engine get", |b| {
+    group.bench_function("get", |b| {
         b.iter(|| {
             rt.block_on(async {
                 engine.get(black_box(key)).await.unwrap();
@@ -28,7 +31,7 @@ fn engine_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("engine scan", |b| {
+    group.bench_function("scan", |b| {
         let start_key = b"a";
         let end_key = b"z";
         b.iter(|| {
@@ -42,13 +45,15 @@ fn engine_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("engine del", |b| {
+    group.bench_function("del", |b| {
         b.iter(|| {
             rt.block_on(async {
                 engine.del(black_box(key)).await.unwrap();
             });
         })
     });
+
+    group.finish();
 }
 
 fn sled_benchmark(c: &mut Criterion) {
@@ -58,7 +63,10 @@ fn sled_benchmark(c: &mut Criterion) {
     let key = b"key";
     let value = b"value";
 
-    c.bench_function("sled insert", |b| {
+    let mut group = c.benchmark_group("sled_basic");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("insert", |b| {
         b.iter(|| {
             rt.block_on(async {
                 db.insert(black_box(key), black_box(value)).unwrap();
@@ -66,7 +74,7 @@ fn sled_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("sled get", |b| {
+    group.bench_function("get", |b| {
         b.iter(|| {
             rt.block_on(async {
                 let _ = db.get(black_box(key)).unwrap().map(|v| v.to_vec());
@@ -74,7 +82,7 @@ fn sled_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("sled scan", |b| {
+    group.bench_function("scan", |b| {
         let start_key = "a";
         let end_key = "z";
         b.iter(|| {
@@ -88,13 +96,15 @@ fn sled_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("sled remove", |b| {
+    group.bench_function("remove", |b| {
         b.iter(|| {
             rt.block_on(async {
                 db.remove(black_box(key)).unwrap();
             });
         })
     });
+
+    group.finish();
 }
 
 fn redb_benchmark(c: &mut Criterion) {
@@ -106,7 +116,10 @@ fn redb_benchmark(c: &mut Criterion) {
     let key = "key";
     let value = "value";
 
-    c.bench_function("redb put", |b| {
+    let mut group = c.benchmark_group("redb_basic");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("put", |b| {
         b.iter(|| {
             rt.block_on(async {
                 let tx = db.begin_write().unwrap();
@@ -119,7 +132,7 @@ fn redb_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("redb get", |b| {
+    group.bench_function("get", |b| {
         b.iter(|| {
             rt.block_on(async {
                 let tx = db.begin_read().unwrap();
@@ -129,7 +142,7 @@ fn redb_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("redb scan", |b| {
+    group.bench_function("scan", |b| {
         let start_key = "a";
         let end_key = "z";
         b.iter(|| {
@@ -145,7 +158,7 @@ fn redb_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("redb del", |b| {
+    group.bench_function("del", |b| {
         b.iter(|| {
             rt.block_on(async {
                 let tx = db.begin_write().unwrap();
@@ -157,6 +170,8 @@ fn redb_benchmark(c: &mut Criterion) {
             });
         })
     });
+
+    group.finish();
 }
 
 fn sqlite_benchmark(c: &mut Criterion) {
@@ -173,7 +188,10 @@ fn sqlite_benchmark(c: &mut Criterion) {
     let key = "key";
     let value = "value";
 
-    c.bench_function("sqlite insert", |b| {
+    let mut group = c.benchmark_group("sqlite_basic");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("insert", |b| {
         b.iter(|| {
             rt.block_on(async {
                 conn.execute("INSERT INTO test (key, value) VALUES (?1, ?2)", params![key, value])
@@ -182,7 +200,7 @@ fn sqlite_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("sqlite get", |b| {
+    group.bench_function("get", |b| {
         b.iter(|| {
             rt.block_on(async {
                 let _: String = conn
@@ -192,7 +210,7 @@ fn sqlite_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("sqlite scan", |b| {
+    group.bench_function("scan", |b| {
         let start_key = "a";
         let end_key = "z";
         b.iter(|| {
@@ -211,13 +229,15 @@ fn sqlite_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("sqlite delete", |b| {
+    group.bench_function("delete", |b| {
         b.iter(|| {
             rt.block_on(async {
                 conn.execute("DELETE FROM test WHERE key = ?1", params![key]).unwrap();
             });
         })
     });
+
+    group.finish();
 }
 
 criterion_group!(benches, engine_benchmark, sled_benchmark, redb_benchmark, sqlite_benchmark);
