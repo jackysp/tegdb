@@ -31,3 +31,7 @@ harness = false
 [[bench]]
 name = "engine_seq_benchmark"
 harness = false
+
+[[bench]]
+name = "engine_concurrent_benchmark"
+harness = false

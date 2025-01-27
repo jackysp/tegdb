@@ -3,6 +3,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock}; // Add RwLock and Arc
 
+#[derive(Clone)]
 pub struct Engine {
     log: Log,
     key_map: Arc<RwLock<KeyMap>>, // Wrap KeyMap in Arc and RwLock
@@ -305,5 +306,20 @@ impl Log {
 
         w.write_all(&buffer).unwrap();
         w.flush().unwrap();
+    }
+}
+
+impl Clone for Log {
+    fn clone(&self) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&self.path)
+            .unwrap();
+        Self {
+            path: self.path.clone(),
+            file,
+        }
     }
 }
