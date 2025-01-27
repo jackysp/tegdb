@@ -1,10 +1,11 @@
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock}; // Add RwLock and Arc
 
 pub struct Engine {
     log: Log,
-    key_map: KeyMap,
+    key_map: Arc<RwLock<KeyMap>>, // Wrap KeyMap in Arc and RwLock
 }
 
 // KeyMap is a BTreeMap that maps keys to a tuple of (position, value length, value).
@@ -13,7 +14,7 @@ type KeyMap = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
 impl Engine {
     pub fn new(path: PathBuf) -> Self {
         let mut log = Log::new(path);
-        let key_map = log.build_key_map();
+        let key_map = Arc::new(RwLock::new(log.build_key_map())); // Wrap KeyMap in Arc and RwLock
         let mut s = Self {
             log,
             key_map,
@@ -23,7 +24,8 @@ impl Engine {
     }
 
     pub async fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        if let Some(value) = self.key_map.get(key) {
+        let key_map = self.key_map.read().unwrap(); // Acquire read lock
+        if let Some(value) = key_map.get(key) {
             Some(value.clone())
         } else {
             None
@@ -42,14 +44,15 @@ impl Engine {
             return self.del(key).await;
         }
 
-        if let Some(existing_value) = self.key_map.get(key) {
+        let mut key_map = self.key_map.write().unwrap(); // Acquire write lock
+        if let Some(existing_value) = key_map.get(key) {
             if *existing_value == value {
                 return Ok(()); // Value already exists, no need to write
             }
         }
 
         self.log.write_entry(key, &*value);
-        self.key_map.insert(
+        key_map.insert(
             key.to_vec(),
             value,
         );
@@ -57,12 +60,13 @@ impl Engine {
     }
 
     pub async fn del(&mut self, key: &[u8]) -> Result<(), std::io::Error> {
-        if self.key_map.get(key).is_none() {
+        let mut key_map = self.key_map.write().unwrap(); // Acquire write lock
+        if key_map.get(key).is_none() {
             return Ok(());
         }
 
         self.log.write_entry(key, &[]);
-        self.key_map.remove(key);
+        key_map.remove(key);
         Ok(())
     }
 
@@ -70,10 +74,11 @@ impl Engine {
         &'a mut self,
         range: Range<Vec<u8>>,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a>, std::io::Error> {
-        let range = self.key_map.range(range);
-        Ok(Box::new(range.map(move |(key, &ref value)| {
-            (key.clone(), value.clone())
-        })))
+        let key_map = self.key_map.read().unwrap(); // Acquire read lock
+        let range: Vec<_> = key_map.range(range)
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        Ok(Box::new(range.into_iter()))
     }
 }
 
@@ -168,7 +173,8 @@ impl Engine {
         let mut new_key_map = KeyMap::new();
         let mut new_log = Log::new(path);
         new_log.file.set_len(0)?;
-        for (key, value) in self.key_map.iter() {
+        let key_map = self.key_map.read().unwrap(); // Acquire read lock
+        for (key, value) in key_map.iter() {
             new_log.write_entry(key, &*value);
             new_key_map.insert(
                 key.to_vec(),
@@ -187,7 +193,7 @@ impl Engine {
         new_log.path = self.log.path.clone();
 
         self.log = new_log;
-        self.key_map = new_key_map;
+        self.key_map = Arc::new(RwLock::new(new_key_map)); // Wrap new KeyMap in Arc and RwLock
         Ok(())
     }
 }
