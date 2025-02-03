@@ -1,11 +1,11 @@
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock}; // Add RwLock and Arc
+use std::sync::{Arc, RwLock, Mutex}; // Add Mutex
 
 #[derive(Clone)]
 pub struct Engine {
-    log: Log,
+    log: Arc<Mutex<Log>>, // Wrap Log in Arc and Mutex
     key_map: Arc<RwLock<KeyMap>>, // Wrap KeyMap in Arc and RwLock
 }
 
@@ -14,8 +14,8 @@ type KeyMap = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
 
 impl Engine {
     pub fn new(path: PathBuf) -> Self {
-        let mut log = Log::new(path);
-        let key_map = Arc::new(RwLock::new(log.build_key_map())); // Wrap KeyMap in Arc and RwLock
+        let log = Arc::new(Mutex::new(Log::new(path))); // Wrap Log in Arc and Mutex
+        let key_map = Arc::new(RwLock::new(log.lock().unwrap().build_key_map())); // Wrap KeyMap in Arc and RwLock
         let mut s = Self {
             log,
             key_map,
@@ -52,7 +52,7 @@ impl Engine {
             }
         }
 
-        self.log.write_entry(key, &*value);
+        self.log.lock().unwrap().write_entry(key, &*value); // Acquire log lock
         key_map.insert(
             key.to_vec(),
             value,
@@ -66,7 +66,7 @@ impl Engine {
             return Ok(());
         }
 
-        self.log.write_entry(key, &[]);
+        self.log.lock().unwrap().write_entry(key, &[]); // Acquire log lock
         key_map.remove(key);
         Ok(())
     }
@@ -193,7 +193,7 @@ mod tests {
 
 impl Engine {
     fn flush(&mut self) -> Result<(), std::io::Error> {
-        self.log.file.sync_all()?;
+        self.log.lock().unwrap().file.sync_all()?; // Acquire log lock
         Ok(())
     }
 
@@ -213,14 +213,14 @@ impl Engine {
     }
 
     fn compact(&mut self) -> Result<(), std::io::Error> {
-        let mut tmp_path = self.log.path.clone();
+        let mut tmp_path = self.log.lock().unwrap().path.clone(); // Acquire log lock
         tmp_path.set_extension("new");
         let (mut new_log, new_key_map) = self.construct_log(tmp_path)?;
 
-        std::fs::rename(&new_log.path, &self.log.path)?;
-        new_log.path = self.log.path.clone();
+        std::fs::rename(&new_log.path, &self.log.lock().unwrap().path)?; // Acquire log lock
+        new_log.path = self.log.lock().unwrap().path.clone(); // Acquire log lock
 
-        self.log = new_log;
+        self.log = Arc::new(Mutex::new(new_log)); // Wrap new Log in Arc and Mutex
         self.key_map = Arc::new(RwLock::new(new_key_map)); // Wrap new KeyMap in Arc and RwLock
         Ok(())
     }
