@@ -1,85 +1,137 @@
+//! This module implements a persistent key-value storage engine using an append-only log.
+//! It provides CRUD operations with automatic log compaction for optimization.
+
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, Mutex}; // Add Mutex
+use std::sync::{Arc, Mutex, RwLock};
 
+/// Core storage engine that provides CRUD operations with log compaction.
 #[derive(Clone)]
 pub struct Engine {
-    log: Arc<Mutex<Log>>, // Wrap Log in Arc and Mutex
-    key_map: Arc<RwLock<KeyMap>>, // Wrap KeyMap in Arc and RwLock
+    log: Arc<Mutex<Log>>,         // Append-only log file for persistence.
+    key_map: Arc<RwLock<KeyMap>>, // In-memory key-value index for fast lookups.
 }
 
-// KeyMap is a BTreeMap that maps keys to a tuple of (position, value length, value).
+// Internal type alias for the key-value store.
 type KeyMap = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
 
 impl Engine {
+    /// Creates a new storage engine instance.
+    /// Initializes the log and rebuilds the in-memory key map.
+    /// Immediately runs log compaction to optimize storage.
     pub fn new(path: PathBuf) -> Self {
-        let log = Arc::new(Mutex::new(Log::new(path))); // Wrap Log in Arc and Mutex
-        let key_map = Arc::new(RwLock::new(log.lock().unwrap().build_key_map())); // Wrap KeyMap in Arc and RwLock
-        let mut s = Self {
-            log,
-            key_map,
-        };
+        let log = Arc::new(Mutex::new(Log::new(path)));
+        let key_map = Arc::new(RwLock::new(log.lock().unwrap().build_key_map()));
+        let mut s = Self { log, key_map };
         s.compact().expect("Failed to compact log");
         s
     }
 
+    /// Retrieves a value for the given key.
     pub async fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        let key_map = self.key_map.read().unwrap(); // Acquire read lock
-        if let Some(value) = key_map.get(key) {
-            Some(value.clone())
-        } else {
-            None
-        }
+        let key_map = self.key_map.read().unwrap();
+        key_map.get(key).map(|v| v.clone())
     }
 
+    /// Sets a value for the given key.
+    /// If the value is empty, the key is deleted.
+    /// Returns error if key > 1KB or value > 256KB.
     pub async fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), std::io::Error> {
+        // Validate key and value sizes.
         if key.len() > 1024 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Key length exceeds 1k"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Key length exceeds 1k",
+            ));
         }
         if value.len() > 256 * 1024 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Value length exceeds 256k"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Value length exceeds 256k",
+            ));
         }
 
-        if value.len() == 0 {
+        // Use empty value to signal deletion.
+        if value.is_empty() {
             return self.del(key).await;
         }
 
-        let mut key_map = self.key_map.write().unwrap(); // Acquire write lock
-        if let Some(existing_value) = key_map.get(key) {
-            if *existing_value == value {
-                return Ok(()); // Value already exists, no need to write
+        let mut key_map = self.key_map.write().unwrap();
+
+        // Skip update if the value has not changed.
+        if let Some(existing) = key_map.get(key) {
+            if *existing == value {
+                return Ok(());
             }
         }
 
-        self.log.lock().unwrap().write_entry(key, &*value); // Acquire log lock
-        key_map.insert(
-            key.to_vec(),
-            value,
-        );
+        self.log.lock().unwrap().write_entry(key, &value);
+        key_map.insert(key.to_vec(), value);
         Ok(())
     }
 
+    /// Deletes the value for the given key.
+    /// If the key does not exist, the operation is a no-op.
     pub async fn del(&mut self, key: &[u8]) -> Result<(), std::io::Error> {
-        let mut key_map = self.key_map.write().unwrap(); // Acquire write lock
+        let mut key_map = self.key_map.write().unwrap();
         if key_map.get(key).is_none() {
             return Ok(());
         }
 
-        self.log.lock().unwrap().write_entry(key, &[]); // Acquire log lock
+        self.log.lock().unwrap().write_entry(key, &[]);
         key_map.remove(key);
         Ok(())
     }
 
+    /// Returns an iterator over a range of key-value pairs.
     pub async fn scan<'a>(
         &'a mut self,
         range: Range<Vec<u8>>,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a>, std::io::Error> {
-        let key_map = self.key_map.read().unwrap(); // Acquire read lock
-        let range: Vec<_> = key_map.range(range)
-            .map(|(key, value)| (key.clone(), value.clone()))
+        let key_map = self.key_map.read().unwrap();
+        let range: Vec<_> = key_map
+            .range(range)
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         Ok(Box::new(range.into_iter()))
+    }
+
+    // Flushes the underlying log file to ensure data persistence.
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        self.log.lock().unwrap().file.sync_all()
+    }
+
+    /// Compacts the log to remove stale entries.
+    /// A new log file with only valid entries is constructed and replaces the old log.
+    fn compact(&mut self) -> Result<(), std::io::Error> {
+        // Define a temporary file path for the new log.
+        let mut tmp_path = self.log.lock().unwrap().path.clone();
+        tmp_path.set_extension("new");
+        let (mut new_log, new_key_map) = self.construct_log(tmp_path)?;
+
+        // Swap the new log file with the existing one.
+        std::fs::rename(&new_log.path, &self.log.lock().unwrap().path)?;
+        new_log.path = self.log.lock().unwrap().path.clone();
+
+        self.log = Arc::new(Mutex::new(new_log));
+        self.key_map = Arc::new(RwLock::new(new_key_map));
+        Ok(())
+    }
+
+    /// Constructs a new log file by copying only valid key-value entries.
+    fn construct_log(&mut self, path: PathBuf) -> Result<(Log, KeyMap), std::io::Error> {
+        let mut new_key_map = KeyMap::new();
+        let mut new_log = Log::new(path);
+        new_log.file.set_len(0)?;
+
+        // Copy valid entries from the existing key map.
+        let key_map = self.key_map.read().unwrap();
+        for (key, value) in key_map.iter() {
+            new_log.write_entry(key, value);
+            new_key_map.insert(key.to_vec(), value.clone());
+        }
+        Ok((new_log, new_key_map))
     }
 }
 
@@ -120,7 +172,10 @@ mod tests {
         // Test scan
         let start_key = b"a";
         let end_key = b"z";
-        engine.set(start_key, b"start_value".to_vec()).await.unwrap();
+        engine
+            .set(start_key, b"start_value".to_vec())
+            .await
+            .unwrap();
         engine.set(end_key, b"end_value".to_vec()).await.unwrap();
         let mut end_key_extended = Vec::new();
         end_key_extended.extend_from_slice(end_key);
@@ -191,58 +246,25 @@ mod tests {
     }
 }
 
-impl Engine {
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        self.log.lock().unwrap().file.sync_all()?; // Acquire log lock
-        Ok(())
-    }
-
-    fn construct_log(&mut self, path: PathBuf) -> Result<(Log, KeyMap), std::io::Error> {
-        let mut new_key_map = KeyMap::new();
-        let mut new_log = Log::new(path);
-        new_log.file.set_len(0)?;
-        let key_map = self.key_map.read().unwrap(); // Acquire read lock
-        for (key, value) in key_map.iter() {
-            new_log.write_entry(key, &*value);
-            new_key_map.insert(
-                key.to_vec(),
-                value.clone(),
-            );
-        }
-        Ok((new_log, new_key_map))
-    }
-
-    fn compact(&mut self) -> Result<(), std::io::Error> {
-        let mut tmp_path = self.log.lock().unwrap().path.clone(); // Acquire log lock
-        tmp_path.set_extension("new");
-        let (mut new_log, new_key_map) = self.construct_log(tmp_path)?;
-
-        std::fs::rename(&new_log.path, &self.log.lock().unwrap().path)?; // Acquire log lock
-        new_log.path = self.log.lock().unwrap().path.clone(); // Acquire log lock
-
-        self.log = Arc::new(Mutex::new(new_log)); // Wrap new Log in Arc and Mutex
-        self.key_map = Arc::new(RwLock::new(new_key_map)); // Wrap new KeyMap in Arc and RwLock
-        Ok(())
-    }
-}
-
 impl Drop for Engine {
     fn drop(&mut self) {
         self.flush().unwrap();
     }
 }
 
+/// Log manages the append-only log file used for data persistence.
 struct Log {
     path: PathBuf,
     file: std::fs::File,
 }
 
 impl Log {
+    /// Creates a new log instance.
+    /// Ensures the directory for the log file exists.
     fn new(path: PathBuf) -> Self {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).unwrap()
         }
-
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -252,6 +274,8 @@ impl Log {
         Self { path, file }
     }
 
+    /// Rebuilds the in-memory key map by scanning the log file.
+    /// Iterates through each log entry and applies insertions and deletions.
     fn build_key_map(&mut self) -> KeyMap {
         let mut len_buf = [0u8; 4];
         let mut key_map = KeyMap::new();
@@ -272,6 +296,7 @@ impl Log {
             let mut value = vec![0; value_len as usize];
             r.read_exact(&mut value).unwrap();
 
+            // Remove the key if the entry represents a deletion.
             if value_len == 0 {
                 key_map.remove(&key);
             } else {
@@ -283,22 +308,22 @@ impl Log {
         key_map
     }
 
+    /// Writes a key-value entry to the log.
+    /// Entry format: [key_len (4 bytes)][value_len (4 bytes)][key][value]
     fn write_entry(&mut self, key: &[u8], value: &[u8]) {
         if key.len() > 1024 || value.len() > 256 * 1024 {
-            panic!("Key or value length exceeds the allowed limit");
+            panic!("Key or value length exceeds allowed limit");
         }
-        // Calculate the length of the entry. The structure of an entry is: key_len (4 bytes), value_len (4 bytes), key (key_len bytes), value (value_len bytes).
         let key_len = key.len() as u32;
         let value_len = value.len() as u32;
         let len = 4 + 4 + key_len + value_len;
 
-        // Always append to the end of the file.
-        _ = self.file.seek(SeekFrom::End(0)).unwrap();
+        // Append the entry at the end of the file.
+        let _ = self.file.seek(SeekFrom::End(0)).unwrap();
         let mut w = BufWriter::with_capacity(len as usize, &mut self.file);
 
         let mut buffer = Vec::with_capacity(len as usize);
-
-        // Write the length of the key and value, and then the key and value.
+        // Build the entry buffer: header lengths then key and value.
         buffer.extend_from_slice(&key_len.to_be_bytes());
         buffer.extend_from_slice(&value_len.to_be_bytes());
         buffer.extend_from_slice(key);

@@ -25,13 +25,17 @@ rusqlite = "0.31.0"
 tempfile = "3.10.1"
 
 [[bench]]
-name = "engine_basic_benchmark"
+name = "engine_benchmark"
 harness = false
 
 [[bench]]
-name = "engine_seq_benchmark"
+name = "sled_benchmark"
 harness = false
 
 [[bench]]
-name = "engine_concurrent_benchmark"
+name = "redb_benchmark"
+harness = false
+
+[[bench]]
+name = "sqlite_benchmark"
 harness = false
