@@ -1,12 +1,17 @@
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, Mutex}; // Add Mutex
+use std::sync::Arc;
+use parking_lot::{RwLock, Mutex};
 
 #[derive(Clone)]
 pub struct Engine {
-    log: Arc<Mutex<Log>>, // Wrap Log in Arc and Mutex
-    key_map: Arc<RwLock<KeyMap>>, // Wrap KeyMap in Arc and RwLock
+    inner: Arc<RwLock<EngineInner>>,
+}
+
+struct EngineInner {
+    log: Log,
+    key_map: KeyMap,
 }
 
 // KeyMap is a BTreeMap that maps keys to a tuple of (position, value length, value).
@@ -14,26 +19,21 @@ type KeyMap = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
 
 impl Engine {
     pub fn new(path: PathBuf) -> Self {
-        let log = Arc::new(Mutex::new(Log::new(path))); // Wrap Log in Arc and Mutex
-        let key_map = Arc::new(RwLock::new(log.lock().unwrap().build_key_map())); // Wrap KeyMap in Arc and RwLock
+        let log = Log::new(path);
+        let key_map = log.build_key_map();
         let mut s = Self {
-            log,
-            key_map,
+            inner: Arc::new(RwLock::new(EngineInner { log, key_map })),
         };
         s.compact().expect("Failed to compact log");
         s
     }
 
-    pub async fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        let key_map = self.key_map.read().unwrap(); // Acquire read lock
-        if let Some(value) = key_map.get(key) {
-            Some(value.clone())
-        } else {
-            None
-        }
+    pub async fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let inner = self.inner.read();
+        inner.key_map.get(key).map(|value| value.clone())
     }
 
-    pub async fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), std::io::Error> {
+    pub async fn set(&self, key: &[u8], value: Vec<u8>) -> Result<(), std::io::Error> {
         if key.len() > 1024 {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Key length exceeds 1k"));
         }
@@ -45,41 +45,40 @@ impl Engine {
             return self.del(key).await;
         }
 
-        let mut key_map = self.key_map.write().unwrap(); // Acquire write lock
-        if let Some(existing_value) = key_map.get(key) {
+        let mut inner = self.inner.write();
+        if let Some(existing_value) = inner.key_map.get(key) {
             if *existing_value == value {
                 return Ok(()); // Value already exists, no need to write
             }
         }
 
-        self.log.lock().unwrap().write_entry(key, &*value); // Acquire log lock
-        key_map.insert(
+        inner.log.write_entry(key, &*value);
+        inner.key_map.insert(
             key.to_vec(),
             value,
         );
         Ok(())
     }
 
-    pub async fn del(&mut self, key: &[u8]) -> Result<(), std::io::Error> {
-        let mut key_map = self.key_map.write().unwrap(); // Acquire write lock
-        if key_map.get(key).is_none() {
+    pub async fn del(&self, key: &[u8]) -> Result<(), std::io::Error> {
+        let mut inner = self.inner.write();
+        if inner.key_map.get(key).is_none() {
             return Ok(());
         }
 
-        self.log.lock().unwrap().write_entry(key, &[]); // Acquire log lock
-        key_map.remove(key);
+        inner.log.write_entry(key, &[]);
+        inner.key_map.remove(key);
         Ok(())
     }
 
     pub async fn scan<'a>(
-        &'a mut self,
+        &'a self,
         range: Range<Vec<u8>>,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a>, std::io::Error> {
-        let key_map = self.key_map.read().unwrap(); // Acquire read lock
-        let range: Vec<_> = key_map.range(range)
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        Ok(Box::new(range.into_iter()))
+        let inner = self.inner.read();
+        let iter = inner.key_map.range(range)
+            .map(|(key, value)| (key.clone(), value.clone()));
+        Ok(Box::new(iter))
     }
 }
 
@@ -91,7 +90,7 @@ mod tests {
     #[tokio::test]
     async fn test_engine() {
         let path = PathBuf::from("test.db");
-        let mut engine = Engine::new(path.clone());
+        let engine = Engine::new(path.clone());
 
         // Test set and get
         let key = b"key";
@@ -192,17 +191,18 @@ mod tests {
 }
 
 impl Engine {
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        self.log.lock().unwrap().file.sync_all()?; // Acquire log lock
+    fn flush(&self) -> Result<(), std::io::Error> {
+        let inner = self.inner.read();
+        inner.log.file.sync_all()?;
         Ok(())
     }
 
-    fn construct_log(&mut self, path: PathBuf) -> Result<(Log, KeyMap), std::io::Error> {
+    fn construct_log(&self, path: PathBuf) -> Result<(Log, KeyMap), std::io::Error> {
         let mut new_key_map = KeyMap::new();
         let mut new_log = Log::new(path);
         new_log.file.set_len(0)?;
-        let key_map = self.key_map.read().unwrap(); // Acquire read lock
-        for (key, value) in key_map.iter() {
+        let inner = self.inner.read();
+        for (key, value) in inner.key_map.iter() {
             new_log.write_entry(key, &*value);
             new_key_map.insert(
                 key.to_vec(),
@@ -212,16 +212,17 @@ impl Engine {
         Ok((new_log, new_key_map))
     }
 
-    fn compact(&mut self) -> Result<(), std::io::Error> {
-        let mut tmp_path = self.log.lock().unwrap().path.clone(); // Acquire log lock
+    fn compact(&self) -> Result<(), std::io::Error> {
+        let mut tmp_path = self.inner.read().log.path.clone();
         tmp_path.set_extension("new");
         let (mut new_log, new_key_map) = self.construct_log(tmp_path)?;
 
-        std::fs::rename(&new_log.path, &self.log.lock().unwrap().path)?; // Acquire log lock
-        new_log.path = self.log.lock().unwrap().path.clone(); // Acquire log lock
+        std::fs::rename(&new_log.path, &self.inner.read().log.path)?;
+        new_log.path = self.inner.read().log.path.clone();
 
-        self.log = Arc::new(Mutex::new(new_log)); // Wrap new Log in Arc and Mutex
-        self.key_map = Arc::new(RwLock::new(new_key_map)); // Wrap new KeyMap in Arc and RwLock
+        let mut inner = self.inner.write();
+        inner.log = new_log;
+        inner.key_map = new_key_map;
         Ok(())
     }
 }
