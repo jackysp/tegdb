@@ -4,17 +4,15 @@
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
+use dashmap::DashMap;
 
 /// Core storage engine that provides CRUD operations with log compaction.
 #[derive(Clone)]
 pub struct Engine {
     log: Arc<Mutex<Log>>,         // Append-only log file for persistence.
-    key_map: Arc<RwLock<KeyMap>>, // In-memory key-value index for fast lookups.
+    key_map: Arc<DashMap<Vec<u8>, Vec<u8>>>,    // Replaced RwLock<KeyMap> with DashMap for scalability.
 }
-
-// Internal type alias for the key-value store.
-type KeyMap = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
 
 impl Engine {
     /// Creates a new storage engine instance.
@@ -22,7 +20,11 @@ impl Engine {
     /// Immediately runs log compaction to optimize storage.
     pub fn new(path: PathBuf) -> Self {
         let log = Arc::new(Mutex::new(Log::new(path)));
-        let key_map = Arc::new(RwLock::new(log.lock().unwrap().build_key_map()));
+        let built_map = log.lock().unwrap().build_key_map();
+        let key_map = Arc::new(DashMap::new());
+        for (k, v) in built_map {
+            key_map.insert(k, v);
+        }
         let mut s = Self { log, key_map };
         s.compact().expect("Failed to compact log");
         s
@@ -30,8 +32,7 @@ impl Engine {
 
     /// Retrieves a value for the given key.
     pub async fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        let key_map = self.key_map.read().unwrap();
-        key_map.get(key).map(|v| v.clone())
+        self.key_map.get(key).map(|entry| entry.value().clone())
     }
 
     /// Sets a value for the given key.
@@ -57,30 +58,27 @@ impl Engine {
             return self.del(key).await;
         }
 
-        let mut key_map = self.key_map.write().unwrap();
-
         // Skip update if the value has not changed.
-        if let Some(existing) = key_map.get(key) {
+        if let Some(existing) = self.key_map.get(key) {
             if *existing == value {
                 return Ok(());
             }
         }
 
         self.log.lock().unwrap().write_entry(key, &value);
-        key_map.insert(key.to_vec(), value);
+        self.key_map.insert(key.to_vec(), value);
         Ok(())
     }
 
     /// Deletes the value for the given key.
     /// If the key does not exist, the operation is a no-op.
     pub async fn del(&mut self, key: &[u8]) -> Result<(), std::io::Error> {
-        let mut key_map = self.key_map.write().unwrap();
-        if key_map.get(key).is_none() {
+        if self.key_map.get(key).is_none() {
             return Ok(());
         }
 
         self.log.lock().unwrap().write_entry(key, &[]);
-        key_map.remove(key);
+        self.key_map.remove(key);
         Ok(())
     }
 
@@ -89,12 +87,14 @@ impl Engine {
         &'a mut self,
         range: Range<Vec<u8>>,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a>, std::io::Error> {
-        let key_map = self.key_map.read().unwrap();
-        let range: Vec<_> = key_map
-            .range(range)
-            .map(|(k, v)| (k.clone(), v.clone()))
+        let mut results: Vec<(Vec<u8>, Vec<u8>)> = self
+            .key_map
+            .iter()
+            .filter(|entry| entry.key() >= &range.start && entry.key() < &range.end)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
-        Ok(Box::new(range.into_iter()))
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Box::new(results.into_iter()))
     }
 
     // Flushes the underlying log file to ensure data persistence.
@@ -115,21 +115,23 @@ impl Engine {
         new_log.path = self.log.lock().unwrap().path.clone();
 
         self.log = Arc::new(Mutex::new(new_log));
-        self.key_map = Arc::new(RwLock::new(new_key_map));
+        self.key_map = Arc::new(DashMap::new());
+        for (k, v) in new_key_map {
+            self.key_map.insert(k, v);
+        }
         Ok(())
     }
 
     /// Constructs a new log file by copying only valid key-value entries.
-    fn construct_log(&mut self, path: PathBuf) -> Result<(Log, KeyMap), std::io::Error> {
-        let mut new_key_map = KeyMap::new();
+    fn construct_log(&mut self, path: PathBuf) -> Result<(Log, DashMap<Vec<u8>, Vec<u8>>), std::io::Error> {
+        let new_key_map = DashMap::new();
         let mut new_log = Log::new(path);
         new_log.file.set_len(0)?;
 
         // Copy valid entries from the existing key map.
-        let key_map = self.key_map.read().unwrap();
-        for (key, value) in key_map.iter() {
-            new_log.write_entry(key, value);
-            new_key_map.insert(key.to_vec(), value.clone());
+        for entry in self.key_map.iter() {
+            new_log.write_entry(entry.key(), entry.value());
+            new_key_map.insert(entry.key().clone(), entry.value().clone());
         }
         Ok((new_log, new_key_map))
     }
@@ -276,9 +278,9 @@ impl Log {
 
     /// Rebuilds the in-memory key map by scanning the log file.
     /// Iterates through each log entry and applies insertions and deletions.
-    fn build_key_map(&mut self) -> KeyMap {
+    fn build_key_map(&mut self) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
         let mut len_buf = [0u8; 4];
-        let mut key_map = KeyMap::new();
+        let mut key_map = std::collections::BTreeMap::new();
         let file_len = self.file.metadata().unwrap().len();
         let mut r = BufReader::new(&mut self.file);
         let mut pos = r.seek(SeekFrom::Start(0)).unwrap();
