@@ -14,6 +14,9 @@ fn engine_benchmark(c: &mut Criterion) {
     let value = b"value";
 
     let mut group = c.benchmark_group("engine_basic");
+    group.warm_up_time(std::time::Duration::from_secs(5));
+    group.measurement_time(std::time::Duration::from_secs(10));
+    group.sample_size(100);
     group.throughput(Throughput::Elements(1));
 
     // Benchmark for set operation.
@@ -70,6 +73,9 @@ async fn engine_seq_benchmark(c: &mut Criterion, value_size: usize) {
     let value = vec![0; value_size];
 
     let mut group = c.benchmark_group(format!("engine_seq_{}", value_size));
+    group.warm_up_time(std::time::Duration::from_secs(5));
+    group.measurement_time(std::time::Duration::from_secs(10));
+    group.sample_size(100);
     group.throughput(Throughput::Elements(1));
 
     // Sequential benchmark for set.
@@ -141,6 +147,9 @@ fn engine_long_benchmark(c: &mut Criterion) {
 fn engine_concurrency_benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("engine_concurrent");
+    group.warm_up_time(std::time::Duration::from_secs(5));
+    group.measurement_time(std::time::Duration::from_secs(10));
+    group.sample_size(100);
     group.throughput(Throughput::Elements(4));
 
     // Remove concurrent.db once before running the benchmarks.
