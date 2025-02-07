@@ -2,6 +2,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use tokio::runtime::Runtime;
+use rand::Rng;
+use rand::distr::Alphanumeric;
 
 fn sled_benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
@@ -133,94 +135,96 @@ fn sled_long_benchmark(c: &mut Criterion) {
 fn sled_concurrency_benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("sled_concurrent");
-    // 4 concurrent operations per iteration.
     group.throughput(Throughput::Elements(4));
+
+    // Remove concurrent_sled directory once before running the benchmarks.
+    std::fs::remove_dir_all("concurrent_sled").ok();
 
     // Concurrent benchmark for insert.
     group.bench_function("insert", |b| {
+        let db = sled::open("concurrent_sled").unwrap();
         b.iter(|| {
-            std::fs::remove_dir_all("concurrent_sled").ok();
             rt.block_on(async {
-                let db = sled::open("concurrent_sled").unwrap();
                 let mut tasks = Vec::new();
                 for _ in 0..4 {
-                    let key = b"key";
-                    let db = db.clone();
+                    let key: String = rand::rng()
+                        .sample_iter(&Alphanumeric)
+                        .take(8)
+                        .map(char::from)
+                        .collect();
+                    let mut rng = rand::rng();
+                    let value: Vec<u8> = (0..10).map(|_| rng.random()).collect();
+                    let db_clone = db.clone();
                     tasks.push(tokio::spawn(async move {
-                        db.insert(key, b"value").unwrap();
+                        db_clone.insert(key.as_bytes(), value).unwrap();
                     }));
                 }
-                for t in tasks {
-                    t.await.unwrap();
-                }
+                for t in tasks { t.await.unwrap(); }
             });
         });
     });
 
     // Concurrent benchmark for get.
     group.bench_function("get", |b| {
+        let db = sled::open("concurrent_sled").unwrap();
         b.iter(|| {
-            std::fs::remove_file("concurrent_sled").ok();
             rt.block_on(async {
-                let db = sled::open("concurrent_sled").unwrap();
                 let mut tasks = Vec::new();
                 for _ in 0..4 {
-                    let key = b"key";
-                    tasks.push(tokio::spawn({
-                        let db = db.clone();
-                        async move {
-                            let _ = db.get(key).unwrap();
-                        }
+                    let key: String = rand::rng() 
+                        .sample_iter(&Alphanumeric)
+                        .take(8)
+                        .map(char::from)
+                        .collect();
+                    let db_clone = db.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let _ = db_clone.get(key.as_bytes()).unwrap();
                     }));
                 }
-                for t in tasks {
-                    t.await.unwrap();
-                }
+                for t in tasks { t.await.unwrap(); }
             });
         });
     });
 
     // Concurrent benchmark for scan.
     group.bench_function("scan", |b| {
+        let db = sled::open("concurrent_sled").unwrap();
         b.iter(|| {
-            std::fs::remove_file("concurrent_sled").ok();
             rt.block_on(async {
-                let db = sled::open("concurrent_sled").unwrap();
                 let mut tasks = Vec::new();
                 for _ in 0..4 {
-                    let db = db.clone();
+                    let db_clone = db.clone();
                     tasks.push(tokio::spawn(async move {
-                        let _ = db.range(black_box("a")..black_box("z"))
+                        let _ = db_clone
+                            .range(black_box("a")..black_box("z"))
                             .values()
-                            .collect::<Result<Vec<_>, _>>();
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap();
                     }));
                 }
-                for t in tasks {
-                    t.await.unwrap();
-                }
+                for t in tasks { t.await.unwrap(); }
             });
         });
     });
 
     // Concurrent benchmark for remove.
     group.bench_function("remove", |b| {
+        let db = sled::open("concurrent_sled").unwrap();
         b.iter(|| {
-            std::fs::remove_file("concurrent_sled").ok();
             rt.block_on(async {
-                let db = sled::open("concurrent_sled").unwrap();
                 let mut tasks = Vec::new();
                 for _ in 0..4 {
-                    let key = b"key";
-                    tasks.push(tokio::spawn({
-                        let db = db.clone();
-                        async move {
-                            let _ = db.remove(key);
-                        }
+                    let key: String = rand::rng()
+                        .sample_iter(&Alphanumeric)
+                        .take(8)
+                        .map(char::from)
+                        .collect();
+                    let db_clone = db.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let _ = db_clone.remove(key.as_bytes());
                     }));
                 }
-                for t in tasks {
-                    t.await.unwrap();
-                }
+                for t in tasks { t.await.unwrap(); }
             });
         });
     });
