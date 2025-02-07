@@ -1,6 +1,9 @@
 //! This module implements a persistent key-value storage engine using an append-only log.
 //! It provides CRUD operations with automatic log compaction for optimization.
 
+// or, if log_writer is declared in your crate's lib.rs, use:
+use crate::log_writer;
+
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -31,14 +34,14 @@ impl Engine {
     }
 
     /// Retrieves a value for the given key.
-    pub async fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+    pub async fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.key_map.get(key).map(|entry| entry.value().clone())
     }
 
     /// Sets a value for the given key.
     /// If the value is empty, the key is deleted.
     /// Returns error if key > 1KB or value > 256KB.
-    pub async fn set(&mut self, key: &[u8], value: Vec<u8>) -> Result<(), std::io::Error> {
+    pub async fn set(&self, key: &[u8], value: Vec<u8>) -> Result<(), std::io::Error> {
         // Validate key and value sizes.
         if key.len() > 1024 {
             return Err(std::io::Error::new(
@@ -72,7 +75,7 @@ impl Engine {
 
     /// Deletes the value for the given key.
     /// If the key does not exist, the operation is a no-op.
-    pub async fn del(&mut self, key: &[u8]) -> Result<(), std::io::Error> {
+    pub async fn del(&self, key: &[u8]) -> Result<(), std::io::Error> {
         if self.key_map.get(key).is_none() {
             return Ok(());
         }
@@ -84,7 +87,7 @@ impl Engine {
 
     /// Returns an iterator over a range of key-value pairs.
     pub async fn scan<'a>(
-        &'a mut self,
+        &'a self,
         range: Range<Vec<u8>>,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a>, std::io::Error> {
         let mut results: Vec<(Vec<u8>, Vec<u8>)> = self
@@ -97,9 +100,10 @@ impl Engine {
         Ok(Box::new(results.into_iter()))
     }
 
-    // Flushes the underlying log file to ensure data persistence.
+    // Flushes the underlying log by instructing the log writer to flush.
     fn flush(&mut self) -> Result<(), std::io::Error> {
-        self.log.file.lock().unwrap().sync_all() // remains: file still handles its own locking
+        self.log.writer.flush();
+        Ok(())
     }
 
     /// Compacts the log to remove stale entries.
@@ -125,10 +129,14 @@ impl Engine {
     /// Constructs a new log file by copying only valid key-value entries.
     fn construct_log(&mut self, path: PathBuf) -> Result<(Log, DashMap<Vec<u8>, Vec<u8>>), std::io::Error> {
         let new_key_map = DashMap::new();
-        let new_log = Log::new(path);
-        new_log.file.lock().unwrap().set_len(0)?;
-
-        // Copy valid entries from the existing key map.
+        let mut new_log = Log::new(path);
+        // Truncate the new log file by opening it directly.
+        {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&new_log.path)?;
+            file.set_len(0)?;
+        }
         for entry in self.key_map.iter() {
             new_log.write_entry(entry.key(), entry.value());
             new_key_map.insert(entry.key().clone(), entry.value().clone());
@@ -257,7 +265,7 @@ impl Drop for Engine {
 /// Log manages the append-only log file used for data persistence.
 struct Log {
     path: PathBuf,
-    file: Mutex<std::fs::File>,  // Changed: wrap file in Mutex.
+    writer: log_writer::LogWriter, // changed: use dedicated log writer only, removed file field
 }
 
 impl Log {
@@ -265,47 +273,36 @@ impl Log {
     /// Ensures the directory for the log file exists.
     fn new(path: PathBuf) -> Self {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).unwrap()
+            std::fs::create_dir_all(dir).unwrap();
         }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)
-            .unwrap();
-        Self { path, file: Mutex::new(file) }
+        Self { path: path.clone(), writer: log_writer::LogWriter::new(path) }
     }
 
     /// Rebuilds the in-memory key map by scanning the log file.
-    /// Iterates through each log entry and applies insertions and deletions.
+    /// Opens the file for reading instead of using self.file.
     fn build_key_map(&self) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
-        let mut len_buf = [0u8; 4];
+        use std::io::{BufReader, Seek, SeekFrom, Read};
         let mut key_map = std::collections::BTreeMap::new();
-        let file_len = self.file.lock().unwrap().metadata().unwrap().len();
-        let file = self.file.lock().unwrap();
-        let mut r = BufReader::new(&*file);
+        let mut file = std::fs::OpenOptions::new().read(true).open(&self.path).unwrap();
+        let file_len = file.metadata().unwrap().len();
+        let mut r = BufReader::new(&mut file);
         let mut pos = r.seek(SeekFrom::Start(0)).unwrap();
-
+        let mut len_buf = [0u8; 4];
         while pos < file_len {
             r.read_exact(&mut len_buf).unwrap();
             let key_len = u32::from_be_bytes(len_buf);
             r.read_exact(&mut len_buf).unwrap();
             let value_len = u32::from_be_bytes(len_buf);
             let value_pos = pos + 4 + 4 + key_len as u64;
-
             let mut key = vec![0; key_len as usize];
             r.read_exact(&mut key).unwrap();
-
             let mut value = vec![0; value_len as usize];
             r.read_exact(&mut value).unwrap();
-
-            // Remove the key if the entry represents a deletion.
             if value_len == 0 {
                 key_map.remove(&key);
             } else {
                 key_map.insert(key, value);
             }
-
             pos = value_pos + value_len as u64;
         }
         key_map
@@ -319,32 +316,20 @@ impl Log {
         }
         let key_len = key.len() as u32;
         let value_len = value.len() as u32;
-        let len = 4 + 4 + key_len + value_len;
-        // Lock the file.
-        let mut file = self.file.lock().unwrap();
-        let _ = file.seek(SeekFrom::End(0)).unwrap();
-        let mut w = BufWriter::with_capacity(len as usize, &mut *file);
-        let mut buffer = Vec::with_capacity(len as usize);
+        let mut buffer = Vec::with_capacity(4 + 4 + key.len() + value.len());
         buffer.extend_from_slice(&key_len.to_be_bytes());
         buffer.extend_from_slice(&value_len.to_be_bytes());
         buffer.extend_from_slice(key);
         buffer.extend_from_slice(value);
-        w.write_all(&buffer).unwrap();
-        w.flush().unwrap();
+        self.writer.write(buffer);
     }
 }
 
 impl Clone for Log {
     fn clone(&self) -> Self {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&self.path)
-            .unwrap();
-        Self { 
-            path: self.path.clone(), 
-            file: Mutex::new(file),
+        Self {
+            path: self.path.clone(),
+            writer: self.writer.clone(),
         }
     }
 }
