@@ -6,7 +6,7 @@ use tegdb::Engine;
 async fn main() {
     // Initialize the database engine using a file-based store.
     let path = PathBuf::from("test.db");
-    let mut engine = Engine::new(path.clone());
+    let engine = Engine::new(path.clone());
 
     // Store a key-value pair.
     let key = b"key";

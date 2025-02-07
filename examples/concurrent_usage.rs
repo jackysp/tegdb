@@ -1,3 +1,4 @@
+// This example demonstrates concurrent, multi-threaded usage of the Tegdb Engine.
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -8,7 +9,6 @@ use tegdb::Engine;
 use tokio::runtime::Builder;
 
 fn main() {
-    // Parse number of threads from command-line argument, default to 4.
     let args: Vec<String> = env::args().collect();
     let thread_count: usize = if args.len() > 1 {
         args[1].parse().unwrap_or(4)
@@ -16,22 +16,18 @@ fn main() {
         4
     };
 
-    // Initialize engine with a file-based store for concurrent access.
     let path = PathBuf::from("test_concurrent.db");
-    // changed: remove existing data file if any
     let _ = fs::remove_file(&path);
     let engine = Engine::new(path);
 
-    // Shared vectors to record call counts using std::sync::Mutex.
     let set_metrics = Arc::new(Mutex::new(Vec::<usize>::new()));
     let get_metrics = Arc::new(Mutex::new(Vec::<usize>::new()));
 
     const RUN_DURATION: Duration = Duration::from_secs(10);
 
-    // Spawn writer threads.
     let mut writer_handles = Vec::new();
     for thread_id in 0..thread_count {
-        let mut engine_writer = engine.clone();
+        let engine_writer = engine.clone();
         let set_metrics_writer = Arc::clone(&set_metrics);
         writer_handles.push(thread::spawn(move || {
             let rt = Builder::new_current_thread().enable_all().build().unwrap();
@@ -39,10 +35,9 @@ fn main() {
                 let start = Instant::now();
                 let mut count = 0;
                 while start.elapsed() < RUN_DURATION {
-                    // changed: include thread id in the key for uniqueness across threads
                     let key = format!("thread_{}_key_{}", thread_id, count);
                     if let Err(e) = engine_writer.set(key.as_bytes(), b"value".to_vec()).await {
-                        eprintln!("Error setting: {}", e);
+                        eprintln!("Error in set(): {}", e);
                     }
                     count += 1;
                 }
@@ -51,15 +46,13 @@ fn main() {
         }));
     }
 
-    // Wait for writer threads to complete.
     for handle in writer_handles {
         let _ = handle.join();
     }
 
-    // Spawn reader threads.
     let mut reader_handles = Vec::new();
     for thread_id in 0..thread_count {
-        let mut engine_reader = engine.clone();
+        let engine_reader = engine.clone();
         let get_metrics_reader = Arc::clone(&get_metrics);
         reader_handles.push(thread::spawn(move || {
             let rt = Builder::new_current_thread().enable_all().build().unwrap();
@@ -67,7 +60,6 @@ fn main() {
                 let start = Instant::now();
                 let mut count = 0;
                 while start.elapsed() < RUN_DURATION {
-                    // changed: include thread id in the key for uniqueness across threads
                     let key = format!("thread_{}_key_{}", thread_id, count);
                     let _ = engine_reader.get(key.as_bytes()).await;
                     count += 1;
@@ -77,12 +69,10 @@ fn main() {
         }));
     }
 
-    // Wait for reader threads to complete.
     for handle in reader_handles {
         let _ = handle.join();
     }
 
-    // Calculate and print performance stats.
     let set_metrics = set_metrics.lock().unwrap();
     let get_metrics = get_metrics.lock().unwrap();
     let total_set_calls: usize = set_metrics.iter().sum();

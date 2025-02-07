@@ -1,4 +1,4 @@
 mod engine;
-mod log_writer;
+mod log;
 
 pub use engine::Engine;

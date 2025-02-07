@@ -9,7 +9,7 @@ use rand::distr::Alphanumeric;
 
 fn engine_benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let mut engine = Engine::new(PathBuf::from("test.db"));
+    let engine = Engine::new(PathBuf::from("test.db"));
     let key = b"key";
     let value = b"value";
 
@@ -69,7 +69,7 @@ fn engine_benchmark(c: &mut Criterion) {
 
 /// Sequential benchmark tests using keys with varying value sizes.
 async fn engine_seq_benchmark(c: &mut Criterion, value_size: usize) {
-    let mut engine = Engine::new(PathBuf::from("test.db"));
+    let engine = Engine::new(PathBuf::from("test.db"));
     let value = vec![0; value_size];
 
     let mut group = c.benchmark_group(format!("engine_seq_{}", value_size));
@@ -169,7 +169,7 @@ fn engine_concurrency_benchmark(c: &mut Criterion) {
                         .map(char::from)
                         .collect();
                     let value: Vec<u8> = (0..10).map(|_| rand::rng().random()).collect();
-                    let mut engine_clone = engine.clone();
+                    let engine_clone = engine.clone();
                     tasks.push(tokio::spawn(async move {
                         engine_clone.set(key.as_bytes(), value).await.unwrap_or_default();
                     }));
@@ -193,7 +193,7 @@ fn engine_concurrency_benchmark(c: &mut Criterion) {
                         .take(8)
                         .map(char::from)
                         .collect();
-                    let mut engine_clone = engine.clone();
+                    let engine_clone = engine.clone();
                     tasks.push(tokio::spawn(async move {
                         engine_clone.get(key.as_bytes()).await.unwrap_or_default();
                     }));
@@ -212,7 +212,7 @@ fn engine_concurrency_benchmark(c: &mut Criterion) {
             rt.block_on(async {
                 let mut tasks = Vec::new();
                 for _ in 0..4 {
-                    let mut engine_clone = engine.clone();
+                    let engine_clone = engine.clone();
                     tasks.push(tokio::spawn(async move {
                         let _ = engine_clone
                             .scan(b"a".to_vec()..b"z".to_vec())
@@ -240,7 +240,7 @@ fn engine_concurrency_benchmark(c: &mut Criterion) {
                         .take(8)
                         .map(char::from)
                         .collect();
-                    let mut engine_clone = engine.clone();
+                    let engine_clone = engine.clone();
                     tasks.push(tokio::spawn(async move {
                         engine_clone.del(key.as_bytes()).await.unwrap_or_default();
                     }));

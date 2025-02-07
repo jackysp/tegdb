@@ -1,29 +1,27 @@
-//! This module implements a persistent key-value storage engine using an append-only log.
-//! It provides CRUD operations with automatic log compaction for optimization.
+//! Tegdb Engine: A persistent key-value store with an append-only log and automatic compaction.
+//! This module implements CRUD operations and log rebuilding to maintain data integrity.
 
-// or, if log_writer is declared in your crate's lib.rs, use:
-use crate::log_writer;
+use crate::log;
 
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::ops::Range;
 use dashmap::DashMap;
 
 /// Core storage engine that provides CRUD operations with log compaction.
 #[derive(Clone)]
 pub struct Engine {
-    log: Arc<Log>, // changed: removed Mutex wrapper
-    key_map: Arc<DashMap<Vec<u8>, Vec<u8>>>,    // Replaced RwLock<KeyMap> with DashMap for scalability.
+    log: Arc<log::Log>,
+    key_map: Arc<DashMap<Vec<u8>, Vec<u8>>>,
 }
 
 impl Engine {
-    /// Creates a new storage engine instance.
-    /// Initializes the log and rebuilds the in-memory key map.
-    /// Immediately runs log compaction to optimize storage.
+    /// Creates a new Engine instance.
+    /// Initializes the underlying log, reconstructs the in-memory key map from the log,
+    /// and performs an immediate compaction to optimize storage.
     pub fn new(path: PathBuf) -> Self {
-        let log = Arc::new(Log::new(path)); // changed: no Mutex wrapping
-        let built_map = log.build_key_map();  // call directly on log
+        let log = Arc::new(log::Log::new(path));
+        let built_map = log.build_key_map();
         let key_map = Arc::new(DashMap::new());
         for (k, v) in built_map {
             key_map.insert(k, v);
@@ -33,16 +31,15 @@ impl Engine {
         s
     }
 
-    /// Retrieves a value for the given key.
+    /// Retrieves the value associated with the given key asynchronously.
     pub async fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.key_map.get(key).map(|entry| entry.value().clone())
     }
 
-    /// Sets a value for the given key.
-    /// If the value is empty, the key is deleted.
-    /// Returns error if key > 1KB or value > 256KB.
+    /// Inserts or updates the value for the given key.
+    /// If an empty value is provided, the key is removed.
+    /// Returns an error if the key or value exceeds predefined size limits.
     pub async fn set(&self, key: &[u8], value: Vec<u8>) -> Result<(), std::io::Error> {
-        // Validate key and value sizes.
         if key.len() > 1024 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -55,37 +52,31 @@ impl Engine {
                 "Value length exceeds 256k",
             ));
         }
-
-        // Use empty value to signal deletion.
         if value.is_empty() {
             return self.del(key).await;
         }
-
-        // Skip update if the value has not changed.
         if let Some(existing) = self.key_map.get(key) {
             if *existing == value {
                 return Ok(());
             }
         }
-
-        self.log.write_entry(key, &value); // changed: removed .lock().unwrap()
+        self.log.write_entry(key, &value);
         self.key_map.insert(key.to_vec(), value);
         Ok(())
     }
 
-    /// Deletes the value for the given key.
+    /// Deletes a key-value pair from the store.
     /// If the key does not exist, the operation is a no-op.
     pub async fn del(&self, key: &[u8]) -> Result<(), std::io::Error> {
         if self.key_map.get(key).is_none() {
             return Ok(());
         }
-
-        self.log.write_entry(key, &[]); // changed: removed .lock().unwrap()
+        self.log.write_entry(key, &[]);
         self.key_map.remove(key);
         Ok(())
     }
 
-    /// Returns an iterator over a range of key-value pairs.
+    /// Returns an iterator over key-value pairs within the specified range.
     pub async fn scan<'a>(
         &'a self,
         range: Range<Vec<u8>>,
@@ -100,24 +91,21 @@ impl Engine {
         Ok(Box::new(results.into_iter()))
     }
 
-    // Flushes the underlying log by instructing the log writer to flush.
+    /// Flushes the current log and shuts down the log writer to ensure data persistence.
     fn flush(&mut self) -> Result<(), std::io::Error> {
         self.log.writer.flush();
+        self.log.writer.shutdown();
         Ok(())
     }
 
-    /// Compacts the log to remove stale entries.
-    /// A new log file with only valid entries is constructed and replaces the old log.
+    /// Compacts the log by building a new log file containing only valid entries.
+    /// The new log replaces the old one to reclaim storage space.
     fn compact(&mut self) -> Result<(), std::io::Error> {
-        // Define a temporary file path for the new log.
-        let mut tmp_path = self.log.path.clone(); // changed: removed .lock().unwrap()
+        let mut tmp_path = self.log.path.clone();
         tmp_path.set_extension("new");
         let (mut new_log, new_key_map) = self.construct_log(tmp_path)?;
-
-        // Swap the new log file with the existing one.
         std::fs::rename(&new_log.path, &self.log.path)?;
         new_log.path = self.log.path.clone();
-
         self.log = Arc::new(new_log);
         self.key_map = Arc::new(DashMap::new());
         for (k, v) in new_key_map {
@@ -126,11 +114,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Constructs a new log file by copying only valid key-value entries.
-    fn construct_log(&mut self, path: PathBuf) -> Result<(Log, DashMap<Vec<u8>, Vec<u8>>), std::io::Error> {
+    /// Constructs a compacted log file and a corresponding key map based on valid entries.
+    fn construct_log(&mut self, path: PathBuf) -> Result<(log::Log, DashMap<Vec<u8>, Vec<u8>>), std::io::Error> {
         let new_key_map = DashMap::new();
-        let mut new_log = Log::new(path);
-        // Truncate the new log file by opening it directly.
+        let new_log = log::Log::new(path);
         {
             let file = std::fs::OpenOptions::new()
                 .write(true)
@@ -153,9 +140,7 @@ mod tests {
     #[tokio::test]
     async fn test_engine() {
         let path = PathBuf::from("test.db");
-        let mut engine = Engine::new(path.clone());
-
-        // Test set and get
+        let engine = Engine::new(path.clone());
         let key = b"key";
         let value = b"value";
         engine.set(key, value.to_vec()).await.unwrap();
@@ -167,8 +152,6 @@ mod tests {
             String::from_utf8_lossy(value),
             String::from_utf8_lossy(&get_value)
         );
-
-        // Test del
         engine.del(key).await.unwrap();
         let get_value = engine.get(key).await;
         assert_eq!(
@@ -178,20 +161,14 @@ mod tests {
             String::from_utf8_lossy(&[]),
             String::from_utf8_lossy(get_value.as_deref().unwrap_or_default())
         );
-
-        // Test scan
         let start_key = b"a";
         let end_key = b"z";
-        engine
-            .set(start_key, b"start_value".to_vec())
-            .await
-            .unwrap();
+        engine.set(start_key, b"start_value".to_vec()).await.unwrap();
         engine.set(end_key, b"end_value".to_vec()).await.unwrap();
         let mut end_key_extended = Vec::new();
         end_key_extended.extend_from_slice(end_key);
         end_key_extended.extend_from_slice(&[1u8]);
-        let result = engine
-            .scan(start_key.to_vec()..end_key_extended)
+        let result = engine.scan(start_key.to_vec()..end_key_extended)
             .await
             .unwrap()
             .collect::<Vec<_>>();
@@ -199,31 +176,17 @@ mod tests {
             (start_key.to_vec(), b"start_value".to_vec()),
             (end_key.to_vec(), b"end_value".to_vec()),
         ];
-        let expected_strings: Vec<(String, String)> = expected
-            .iter()
-            .map(|(k, v)| {
-                (
-                    String::from_utf8_lossy(k).into_owned(),
-                    String::from_utf8_lossy(v).into_owned(),
-                )
-            })
-            .collect();
-        let result_strings: Vec<(String, String)> = result
-            .iter()
-            .map(|(k, v)| {
-                (
-                    String::from_utf8_lossy(k).into_owned(),
-                    String::from_utf8_lossy(v).into_owned(),
-                )
-            })
-            .collect();
+        let expected_strings: Vec<(String, String)> = expected.iter().map(|(k, v)| {
+            (String::from_utf8_lossy(k).into_owned(), String::from_utf8_lossy(v).into_owned())
+        }).collect();
+        let result_strings: Vec<(String, String)> = result.iter().map(|(k, v)| {
+            (String::from_utf8_lossy(k).into_owned(), String::from_utf8_lossy(v).into_owned())
+        }).collect();
         assert_eq!(
             result_strings, expected_strings,
             "Expected: {:?}, Got: {:?}",
             expected_strings, result_strings
         );
-
-        // Clean up
         drop(engine);
         fs::remove_file(path).unwrap();
     }
@@ -233,7 +196,6 @@ mod tests {
         use tokio::sync::Mutex;
         let path = PathBuf::from("concurrent.db");
         let engine = Arc::new(Mutex::new(Engine::new(path.clone())));
-
         let tasks: Vec<_> = (0..10)
             .map(|i| {
                 let engine = engine.clone();
@@ -246,11 +208,9 @@ mod tests {
                 })
             })
             .collect();
-
         for t in tasks {
             t.await.unwrap();
         }
-
         drop(engine);
         std::fs::remove_file(path).unwrap();
     }
@@ -259,77 +219,5 @@ mod tests {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.flush().unwrap();
-    }
-}
-
-/// Log manages the append-only log file used for data persistence.
-struct Log {
-    path: PathBuf,
-    writer: log_writer::LogWriter, // changed: use dedicated log writer only, removed file field
-}
-
-impl Log {
-    /// Creates a new log instance.
-    /// Ensures the directory for the log file exists.
-    fn new(path: PathBuf) -> Self {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        Self { path: path.clone(), writer: log_writer::LogWriter::new(path) }
-    }
-
-    /// Rebuilds the in-memory key map by scanning the log file.
-    /// Opens the file for reading instead of using self.file.
-    fn build_key_map(&self) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
-        use std::io::{BufReader, Seek, SeekFrom, Read};
-        let mut key_map = std::collections::BTreeMap::new();
-        let mut file = std::fs::OpenOptions::new().read(true).open(&self.path).unwrap();
-        let file_len = file.metadata().unwrap().len();
-        let mut r = BufReader::new(&mut file);
-        let mut pos = r.seek(SeekFrom::Start(0)).unwrap();
-        let mut len_buf = [0u8; 4];
-        while pos < file_len {
-            r.read_exact(&mut len_buf).unwrap();
-            let key_len = u32::from_be_bytes(len_buf);
-            r.read_exact(&mut len_buf).unwrap();
-            let value_len = u32::from_be_bytes(len_buf);
-            let value_pos = pos + 4 + 4 + key_len as u64;
-            let mut key = vec![0; key_len as usize];
-            r.read_exact(&mut key).unwrap();
-            let mut value = vec![0; value_len as usize];
-            r.read_exact(&mut value).unwrap();
-            if value_len == 0 {
-                key_map.remove(&key);
-            } else {
-                key_map.insert(key, value);
-            }
-            pos = value_pos + value_len as u64;
-        }
-        key_map
-    }
-
-    /// Writes a key-value entry to the log.
-    /// Entry format: [key_len (4 bytes)][value_len (4 bytes)][key][value]
-    fn write_entry(&self, key: &[u8], value: &[u8]) {
-        if key.len() > 1024 || value.len() > 256 * 1024 {
-            panic!("Key or value length exceeds allowed limit");
-        }
-        let key_len = key.len() as u32;
-        let value_len = value.len() as u32;
-        let mut buffer = Vec::with_capacity(4 + 4 + key.len() + value.len());
-        buffer.extend_from_slice(&key_len.to_be_bytes());
-        buffer.extend_from_slice(&value_len.to_be_bytes());
-        buffer.extend_from_slice(key);
-        buffer.extend_from_slice(value);
-        self.writer.write(buffer);
-    }
-}
-
-impl Clone for Log {
-    fn clone(&self) -> Self {
-        Self {
-            path: self.path.clone(),
-            writer: self.writer.clone(),
-        }
     }
 }
