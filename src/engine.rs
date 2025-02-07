@@ -10,7 +10,7 @@ use dashmap::DashMap;
 /// Core storage engine that provides CRUD operations with log compaction.
 #[derive(Clone)]
 pub struct Engine {
-    log: Arc<Mutex<Log>>,         // Append-only log file for persistence.
+    log: Arc<Log>, // changed: removed Mutex wrapper
     key_map: Arc<DashMap<Vec<u8>, Vec<u8>>>,    // Replaced RwLock<KeyMap> with DashMap for scalability.
 }
 
@@ -19,8 +19,8 @@ impl Engine {
     /// Initializes the log and rebuilds the in-memory key map.
     /// Immediately runs log compaction to optimize storage.
     pub fn new(path: PathBuf) -> Self {
-        let log = Arc::new(Mutex::new(Log::new(path)));
-        let built_map = log.lock().unwrap().build_key_map();
+        let log = Arc::new(Log::new(path)); // changed: no Mutex wrapping
+        let built_map = log.build_key_map();  // call directly on log
         let key_map = Arc::new(DashMap::new());
         for (k, v) in built_map {
             key_map.insert(k, v);
@@ -65,7 +65,7 @@ impl Engine {
             }
         }
 
-        self.log.lock().unwrap().write_entry(key, &value);
+        self.log.write_entry(key, &value); // changed: removed .lock().unwrap()
         self.key_map.insert(key.to_vec(), value);
         Ok(())
     }
@@ -77,7 +77,7 @@ impl Engine {
             return Ok(());
         }
 
-        self.log.lock().unwrap().write_entry(key, &[]);
+        self.log.write_entry(key, &[]); // changed: removed .lock().unwrap()
         self.key_map.remove(key);
         Ok(())
     }
@@ -99,22 +99,22 @@ impl Engine {
 
     // Flushes the underlying log file to ensure data persistence.
     fn flush(&mut self) -> Result<(), std::io::Error> {
-        self.log.lock().unwrap().file.sync_all()
+        self.log.file.lock().unwrap().sync_all() // remains: file still handles its own locking
     }
 
     /// Compacts the log to remove stale entries.
     /// A new log file with only valid entries is constructed and replaces the old log.
     fn compact(&mut self) -> Result<(), std::io::Error> {
         // Define a temporary file path for the new log.
-        let mut tmp_path = self.log.lock().unwrap().path.clone();
+        let mut tmp_path = self.log.path.clone(); // changed: removed .lock().unwrap()
         tmp_path.set_extension("new");
         let (mut new_log, new_key_map) = self.construct_log(tmp_path)?;
 
         // Swap the new log file with the existing one.
-        std::fs::rename(&new_log.path, &self.log.lock().unwrap().path)?;
-        new_log.path = self.log.lock().unwrap().path.clone();
+        std::fs::rename(&new_log.path, &self.log.path)?;
+        new_log.path = self.log.path.clone();
 
-        self.log = Arc::new(Mutex::new(new_log));
+        self.log = Arc::new(new_log);
         self.key_map = Arc::new(DashMap::new());
         for (k, v) in new_key_map {
             self.key_map.insert(k, v);
@@ -125,8 +125,8 @@ impl Engine {
     /// Constructs a new log file by copying only valid key-value entries.
     fn construct_log(&mut self, path: PathBuf) -> Result<(Log, DashMap<Vec<u8>, Vec<u8>>), std::io::Error> {
         let new_key_map = DashMap::new();
-        let mut new_log = Log::new(path);
-        new_log.file.set_len(0)?;
+        let new_log = Log::new(path);
+        new_log.file.lock().unwrap().set_len(0)?;
 
         // Copy valid entries from the existing key map.
         for entry in self.key_map.iter() {
@@ -257,7 +257,7 @@ impl Drop for Engine {
 /// Log manages the append-only log file used for data persistence.
 struct Log {
     path: PathBuf,
-    file: std::fs::File,
+    file: Mutex<std::fs::File>,  // Changed: wrap file in Mutex.
 }
 
 impl Log {
@@ -273,16 +273,17 @@ impl Log {
             .create(true)
             .open(&path)
             .unwrap();
-        Self { path, file }
+        Self { path, file: Mutex::new(file) }
     }
 
     /// Rebuilds the in-memory key map by scanning the log file.
     /// Iterates through each log entry and applies insertions and deletions.
-    fn build_key_map(&mut self) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
+    fn build_key_map(&self) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
         let mut len_buf = [0u8; 4];
         let mut key_map = std::collections::BTreeMap::new();
-        let file_len = self.file.metadata().unwrap().len();
-        let mut r = BufReader::new(&mut self.file);
+        let file_len = self.file.lock().unwrap().metadata().unwrap().len();
+        let file = self.file.lock().unwrap();
+        let mut r = BufReader::new(&*file);
         let mut pos = r.seek(SeekFrom::Start(0)).unwrap();
 
         while pos < file_len {
@@ -312,25 +313,22 @@ impl Log {
 
     /// Writes a key-value entry to the log.
     /// Entry format: [key_len (4 bytes)][value_len (4 bytes)][key][value]
-    fn write_entry(&mut self, key: &[u8], value: &[u8]) {
+    fn write_entry(&self, key: &[u8], value: &[u8]) {
         if key.len() > 1024 || value.len() > 256 * 1024 {
             panic!("Key or value length exceeds allowed limit");
         }
         let key_len = key.len() as u32;
         let value_len = value.len() as u32;
         let len = 4 + 4 + key_len + value_len;
-
-        // Append the entry at the end of the file.
-        let _ = self.file.seek(SeekFrom::End(0)).unwrap();
-        let mut w = BufWriter::with_capacity(len as usize, &mut self.file);
-
+        // Lock the file.
+        let mut file = self.file.lock().unwrap();
+        let _ = file.seek(SeekFrom::End(0)).unwrap();
+        let mut w = BufWriter::with_capacity(len as usize, &mut *file);
         let mut buffer = Vec::with_capacity(len as usize);
-        // Build the entry buffer: header lengths then key and value.
         buffer.extend_from_slice(&key_len.to_be_bytes());
         buffer.extend_from_slice(&value_len.to_be_bytes());
         buffer.extend_from_slice(key);
-        buffer.extend_from_slice(&value);
-
+        buffer.extend_from_slice(value);
         w.write_all(&buffer).unwrap();
         w.flush().unwrap();
     }
@@ -344,9 +342,9 @@ impl Clone for Log {
             .create(true)
             .open(&self.path)
             .unwrap();
-        Self {
-            path: self.path.clone(),
-            file,
+        Self { 
+            path: self.path.clone(), 
+            file: Mutex::new(file),
         }
     }
 }
