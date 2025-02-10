@@ -1,12 +1,10 @@
-//! Tegdb Engine: A persistent key-value store with an append-only log and automatic compaction.
-//! This module implements CRUD operations and log rebuilding to maintain data integrity.
-
 use crate::log;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::ops::Range;
 use dashmap::DashMap;
+use tokio::task;
 
 /// Core storage engine that provides CRUD operations with log compaction.
 #[derive(Clone)]
@@ -33,7 +31,10 @@ impl Engine {
 
     /// Retrieves the value associated with the given key asynchronously.
     pub async fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.key_map.get(key).map(|entry| entry.value().clone())
+        let key_map = self.key_map.clone();
+        task::spawn_blocking(move || key_map.get(key).map(|entry| entry.value().clone()))
+            .await
+            .unwrap()
     }
 
     /// Inserts or updates the value for the given key.
@@ -55,25 +56,37 @@ impl Engine {
         if value.is_empty() {
             return self.del(key).await;
         }
-        if let Some(existing) = self.key_map.get(key) {
-            if *existing == value {
-                return Ok(());
+        let key_map = self.key_map.clone();
+        let log = self.log.clone();
+        task::spawn_blocking(move || {
+            if let Some(existing) = key_map.get(key) {
+                if *existing == value {
+                    return Ok(());
+                }
             }
-        }
-        self.log.write_entry(key, &value);
-        self.key_map.insert(key.to_vec(), value);
-        Ok(())
+            log.write_entry(key, &value);
+            key_map.insert(key.to_vec(), value);
+            Ok(())
+        })
+        .await
+        .unwrap()
     }
 
     /// Deletes a key-value pair from the store.
     /// If the key does not exist, the operation is a no-op.
     pub async fn del(&self, key: &[u8]) -> Result<(), std::io::Error> {
-        if self.key_map.get(key).is_none() {
-            return Ok(());
-        }
-        self.log.write_entry(key, &[]);
-        self.key_map.remove(key);
-        Ok(())
+        let key_map = self.key_map.clone();
+        let log = self.log.clone();
+        task::spawn_blocking(move || {
+            if key_map.get(key).is_none() {
+                return Ok(());
+            }
+            log.write_entry(key, &[]);
+            key_map.remove(key);
+            Ok(())
+        })
+        .await
+        .unwrap()
     }
 
     /// Returns an iterator over key-value pairs within the specified range.
@@ -81,14 +94,18 @@ impl Engine {
         &'a self,
         range: Range<Vec<u8>>,
     ) -> Result<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + 'a>, std::io::Error> {
-        let mut results: Vec<(Vec<u8>, Vec<u8>)> = self
-            .key_map
-            .iter()
-            .filter(|entry| entry.key() >= &range.start && entry.key() < &range.end)
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
-        results.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(Box::new(results.into_iter()))
+        let key_map = self.key_map.clone();
+        task::spawn_blocking(move || {
+            let mut results: Vec<(Vec<u8>, Vec<u8>)> = key_map
+                .iter()
+                .filter(|entry| entry.key() >= &range.start && entry.key() < &range.end)
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect();
+            results.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(Box::new(results.into_iter()))
+        })
+        .await
+        .unwrap()
     }
 
     /// Flushes the current log and shuts down the log writer to ensure data persistence.

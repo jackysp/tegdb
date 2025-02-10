@@ -1,5 +1,3 @@
-// Refined header comment:
-// This example demonstrates concurrent, multi-threaded usage of the Tegdb Engine.
 use std::env;
 use std::fs;
 use std::path::PathBuf;
