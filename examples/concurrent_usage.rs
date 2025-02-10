@@ -1,3 +1,4 @@
+// Refined header comment:
 // This example demonstrates concurrent, multi-threaded usage of the Tegdb Engine.
 use std::env;
 use std::fs;
@@ -9,6 +10,7 @@ use tegdb::Engine;
 use tokio::runtime::Builder;
 
 fn main() {
+    // Parse the number of threads; default is 4.
     let args: Vec<String> = env::args().collect();
     let thread_count: usize = if args.len() > 1 {
         args[1].parse().unwrap_or(4)
@@ -16,15 +18,18 @@ fn main() {
         4
     };
 
+    // Initialize the engine and remove any pre-existing data file.
     let path = PathBuf::from("test_concurrent.db");
     let _ = fs::remove_file(&path);
     let engine = Engine::new(path);
 
+    // Shared metrics for tracking set() and get() call counts.
     let set_metrics = Arc::new(Mutex::new(Vec::<usize>::new()));
     let get_metrics = Arc::new(Mutex::new(Vec::<usize>::new()));
 
     const RUN_DURATION: Duration = Duration::from_secs(10);
 
+    // Spawn writer threads.
     let mut writer_handles = Vec::new();
     for thread_id in 0..thread_count {
         let engine_writer = engine.clone();
@@ -35,6 +40,7 @@ fn main() {
                 let start = Instant::now();
                 let mut count = 0;
                 while start.elapsed() < RUN_DURATION {
+                    // Use thread-specific keys for uniqueness.
                     let key = format!("thread_{}_key_{}", thread_id, count);
                     if let Err(e) = engine_writer.set(key.as_bytes(), b"value".to_vec()).await {
                         eprintln!("Error in set(): {}", e);
@@ -46,10 +52,12 @@ fn main() {
         }));
     }
 
+    // Wait for all writer threads.
     for handle in writer_handles {
         let _ = handle.join();
     }
 
+    // Spawn reader threads.
     let mut reader_handles = Vec::new();
     for thread_id in 0..thread_count {
         let engine_reader = engine.clone();
@@ -60,6 +68,7 @@ fn main() {
                 let start = Instant::now();
                 let mut count = 0;
                 while start.elapsed() < RUN_DURATION {
+                    // Use matching thread-specific keys.
                     let key = format!("thread_{}_key_{}", thread_id, count);
                     let _ = engine_reader.get(key.as_bytes()).await;
                     count += 1;
@@ -69,10 +78,12 @@ fn main() {
         }));
     }
 
+    // Wait for all reader threads.
     for handle in reader_handles {
         let _ = handle.join();
     }
 
+    // Calculate and display performance metrics.
     let set_metrics = set_metrics.lock().unwrap();
     let get_metrics = get_metrics.lock().unwrap();
     let total_set_calls: usize = set_metrics.iter().sum();
